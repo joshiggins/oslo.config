@@ -1065,8 +1065,8 @@ class PositionalTestCase(BaseTestCase):
         self.conf.register_cli_opts((
             cfg.StrOpt('command', positional=True),
             cfg.StrOpt('arg1', positional=True),
-            cfg.StrOpt('arg2', positional=True))
-        )
+            cfg.StrOpt('arg2', positional=True),
+        ))
 
         self.conf(['command', 'arg1', 'arg2'])
 
@@ -5166,3 +5166,61 @@ class DeprecationWarningTestsNoOsloLog(DeprecationWarningTests):
         # NOTE(bnemec): For some reason if I apply this as a class decorator
         # it ends up applying to the parent class too and breaks those tests.
         self.useFixture(fixtures.MockPatchObject(cfg, 'oslo_log', None))
+
+
+class MultiServiceConfigTestCase(base.BaseTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self._orig_multi_service = cfg.CONF._multi_service
+        self._orig_registry_instances = dict(cfg._registry._instances)
+        cfg._registry._instances = {}
+        cfg.CONF._multi_service = False
+        cfg.CONF._default.reset()
+
+        def _restore():
+            cfg._registry._instances = self._orig_registry_instances
+            cfg.CONF._multi_service = self._orig_multi_service
+            cfg.CONF._default.reset()
+            try:
+                ctx = cfg._registry._get_context()
+                if hasattr(ctx, 'active_service'):
+                    delattr(ctx, 'active_service')
+            except Exception:
+                pass
+
+        self.addCleanup(_restore)
+
+    def test_duplicate_opt_names_across_services(self):
+        cfg.CONF.enable_multi_service()
+        cfg._registry.register('service-a')
+        cfg._registry.register('service-b')
+
+        cfg._registry.activate('service-a')
+        cfg.CONF.register_opt(cfg.StrOpt('dup_opt'))
+
+        cfg._registry.activate('service-b')
+        cfg.CONF.register_opt(cfg.StrOpt('dup_opt'))
+
+        cfg._registry.activate('service-a')
+        self.assertTrue(hasattr(cfg.CONF, 'dup_opt'))
+        cfg._registry.activate('service-b')
+        self.assertTrue(hasattr(cfg.CONF, 'dup_opt'))
+
+    def test_isolated_overrides_per_service(self):
+        cfg.CONF.enable_multi_service()
+        cfg._registry.register('service-a')
+        cfg._registry.register('service-b')
+
+        cfg._registry.activate('service-a')
+        cfg.CONF.register_opt(cfg.StrOpt('connection', default='a'))
+        cfg.CONF.set_override('connection', 'sqlite:///a.db')
+
+        cfg._registry.activate('service-b')
+        cfg.CONF.register_opt(cfg.StrOpt('connection', default='b'))
+        cfg.CONF.set_override('connection', 'sqlite:///b.db')
+
+        cfg._registry.activate('service-a')
+        self.assertEqual('sqlite:///a.db', cfg.CONF.connection)
+        cfg._registry.activate('service-b')
+        self.assertEqual('sqlite:///b.db', cfg.CONF.connection)

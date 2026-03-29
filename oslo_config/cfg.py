@@ -3471,4 +3471,107 @@ class ConfigOpts(abc.Mapping):
             return value
 
 
-CONF = ConfigOpts()
+class ConfigRegistry:
+
+    """Registry of named ConfigOpts instances for multi-service support."""
+
+    def __init__(self):
+        self._instances = {}
+        self._context_var = None
+
+    def register(self, name):
+        """Create (or return) a ConfigOpts instance for the service name."""
+        if name in self._instances:
+            return self._instances[name]
+        conf = ConfigOpts()
+        self._instances[name] = conf
+        return conf
+
+    def get(self, name):
+        """Get an existing ConfigOpts by name."""
+        return self._instances[name]
+
+    def activate(self, name):
+        """Set the active service context for the current green thread."""
+        self._get_context().active_service = name
+
+    def get_active(self):
+        """Return the ConfigOpts for the currently active service."""
+        name = getattr(self._get_context(), 'active_service', None)
+        if name is None:
+            raise RuntimeError("No service context is active")
+        return self._instances[name]
+
+    def _get_context(self):
+        if self._context_var is None:
+            try:
+                from eventlet.corolocal import local
+                self._context_var = local()
+            except ImportError:
+                import threading
+                self._context_var = threading.local()
+        return self._context_var
+
+
+class ConfigProxy(abc.Mapping):
+
+    """Proxy that dispatches to the active service's ConfigOpts."""
+
+    _proxy_attrs = {'_default', '_multi_service'}
+
+    def __init__(self):
+        object.__setattr__(self, '_default', ConfigOpts())
+        object.__setattr__(self, '_multi_service', False)
+
+    def enable_multi_service(self):
+        """Switch from single-service to multi-service mode."""
+        object.__setattr__(self, '_multi_service', True)
+
+    def _resolve(self):
+        if not self._multi_service:
+            return self._default
+        return _registry.get_active()
+
+    def __getattr__(self, name):
+        return getattr(self._resolve(), name)
+
+    def __setattr__(self, name, value):
+        if name in self._proxy_attrs:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._resolve(), name, value)
+
+    def __delattr__(self, name):
+        if name in self._proxy_attrs:
+            object.__delattr__(self, name)
+        else:
+            delattr(self._resolve(), name)
+
+    def __call__(self, *args, **kwargs):
+        return self._resolve()(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return self._resolve()[key]
+
+    def __contains__(self, key):
+        return key in self._resolve()
+
+    def __iter__(self):
+        return iter(self._resolve())
+
+    def __len__(self):
+        return len(self._resolve())
+
+    def __repr__(self):
+        if self._multi_service:
+            try:
+                target = self._resolve()
+                return f"<ConfigProxy multi_service=True active={target!r}>"
+            except RuntimeError:
+                return "<ConfigProxy multi_service=True active=None>"
+        return f"<ConfigProxy multi_service=False default={self._default!r}>"
+
+
+_registry = ConfigRegistry()
+
+CONF = ConfigProxy()
