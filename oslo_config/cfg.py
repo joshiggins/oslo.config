@@ -2011,8 +2011,36 @@ class ConfigOpts(abc.Mapping):
         self._use_env = True
         self._env_driver = _environment.EnvironmentConfigurationSource()
 
+        self._deferred_overrides = []      # [(group, name, value), ...]
+        self._deferred_args = None         # None = not set
+        self._deferred_config_files = None # None = not set
+
         self.register_opt(self._config_source_opt)
         self.register_cli_opt(self._shell_completion_opt)
+
+    def defer_override(self, name, value, group=None):
+        """Pre-seed a config override for the next CONF() call.
+
+        The override will be applied via set_override() after parsing
+        completes. Does not require the option to be registered yet.
+        """
+        self._deferred_overrides.append((group, name, value))
+
+    def defer_args(self, args):
+        """Pre-seed the args for the next CONF() call.
+
+        When set, replaces the args parameter passed by the service.
+        Set to [] to suppress CLI arg parsing.
+        """
+        self._deferred_args = args
+
+    def defer_default_config_files(self, files):
+        """Pre-seed the default_config_files for the next CONF() call.
+
+        When set, replaces the default_config_files parameter passed
+        by the service. Set to [] to prevent config file discovery.
+        """
+        self._deferred_config_files = files
 
     def _pre_setup(self, project, prog, version, usage, description, epilog,
                    default_config_files, default_config_dirs):
@@ -2161,6 +2189,20 @@ class ConfigOpts(abc.Mapping):
         .. versionchanged:: 9.5.0
         Added shell-completion option for generate a shell completion script.
         """
+        # Apply deferred args if set
+        if self._deferred_args is not None:
+            args = self._deferred_args
+            self._deferred_args = None  # consume
+
+        # Apply deferred config files if set
+        if self._deferred_config_files is not None:
+            default_config_files = self._deferred_config_files
+            self._deferred_config_files = None  # consume
+
+        # Capture deferred overrides before clear() resets them
+        deferred = self._deferred_overrides
+        self._deferred_overrides = []
+
         self.clear()
 
         self._validate_default_values = validate_default_values
@@ -2193,6 +2235,10 @@ class ConfigOpts(abc.Mapping):
         self._load_alternative_sources()
 
         self._check_required_opts()
+
+        # Apply deferred overrides after parsing is complete
+        for group, name, value in deferred:
+            self.set_override(name, value, group=group)
 
     def _print_shell_completion(self, shell):
         """Print shell completion Script
@@ -3549,6 +3595,15 @@ class ConfigProxy(abc.Mapping):
 
     def __call__(self, *args, **kwargs):
         return self._resolve()(*args, **kwargs)
+
+    def defer_override(self, name, value, group=None):
+        return self._resolve().defer_override(name, value, group)
+
+    def defer_args(self, args):
+        return self._resolve().defer_args(args)
+
+    def defer_default_config_files(self, files):
+        return self._resolve().defer_default_config_files(files)
 
     def __getitem__(self, key):
         return self._resolve()[key]

@@ -5224,3 +5224,162 @@ class MultiServiceConfigTestCase(base.BaseTestCase):
         self.assertEqual('sqlite:///a.db', cfg.CONF.connection)
         cfg._registry.activate('service-b')
         self.assertEqual('sqlite:///b.db', cfg.CONF.connection)
+
+
+class DeferredConfigTestCase(BaseTestCase):
+
+    def test_defer_override_basic(self):
+        self.conf.register_opt(cfg.StrOpt('foo', default='bar'))
+        self.conf.defer_override('foo', 'baz')
+        self.conf([])
+        self.assertEqual('baz', self.conf.foo)
+
+    def test_defer_override_before_registration(self):
+        self.conf.defer_override('foo', 'baz')
+        self.conf.register_opt(cfg.StrOpt('foo', default='bar'))
+        self.conf([])
+        self.assertEqual('baz', self.conf.foo)
+
+    def test_defer_override_beats_config_file(self):
+        self.conf.register_opt(cfg.StrOpt('foo'))
+        paths = self.create_tempfiles([('test', '[DEFAULT]\nfoo = fromfile')])
+        self.conf.defer_override('foo', 'deferred')
+        self.conf([], default_config_files=paths)
+        self.assertEqual('deferred', self.conf.foo)
+
+    def test_defer_override_consumed(self):
+        self.conf.register_opt(cfg.StrOpt('foo', default='bar'))
+        self.conf.defer_override('foo', 'baz')
+        self.conf([])
+        self.assertEqual('baz', self.conf.foo)
+        # Deferral list is consumed
+        self.assertEqual([], self.conf._deferred_overrides)
+
+    def test_defer_override_multiple(self):
+        self.conf.register_opt(cfg.StrOpt('a', default='1'))
+        self.conf.register_opt(cfg.StrOpt('b', default='2'))
+        self.conf.defer_override('a', 'x')
+        self.conf.defer_override('b', 'y')
+        self.conf([])
+        self.assertEqual('x', self.conf.a)
+        self.assertEqual('y', self.conf.b)
+
+    def test_defer_override_grouped(self):
+        self.conf.register_group(cfg.OptGroup('mygrp'))
+        self.conf.register_opt(cfg.StrOpt('val', default='old'), group='mygrp')
+        self.conf.defer_override('val', 'new', group='mygrp')
+        self.conf([])
+        self.assertEqual('new', self.conf.mygrp.val)
+
+    def test_defer_override_unknown_option(self):
+        self.conf.defer_override('nonexistent', 'value')
+        self.assertRaises(cfg.NoSuchOptError, self.conf, [])
+
+    def test_defer_args_empty(self):
+        self.conf.register_cli_opt(cfg.BoolOpt('debug', default=False))
+        self.conf.defer_args([])
+        self.conf(args=['--debug'])
+        self.assertFalse(self.conf.debug)
+
+    def test_defer_args_specific(self):
+        self.conf.register_cli_opt(cfg.BoolOpt('verbose', default=False))
+        self.conf.defer_args(['--verbose'])
+        self.conf(args=[])
+        self.assertTrue(self.conf.verbose)
+
+    def test_defer_args_consumed(self):
+        self.conf.register_cli_opt(cfg.BoolOpt('debug', default=False))
+        self.conf.defer_args([])
+        self.conf(args=['--debug'])
+        self.assertFalse(self.conf.debug)
+        # Deferral is consumed
+        self.assertIsNone(self.conf._deferred_args)
+
+    def test_defer_args_none_no_interference(self):
+        self.conf.register_cli_opt(cfg.BoolOpt('debug', default=False))
+        self.conf.defer_args(None)
+        self.conf(args=['--debug'])
+        self.assertTrue(self.conf.debug)
+
+    def test_defer_default_config_files_empty(self):
+        self.conf.register_opt(cfg.StrOpt('foo', default='bar'))
+        paths = self.create_tempfiles([('test', '[DEFAULT]\nfoo = fromfile')])
+        self.conf.defer_default_config_files([])
+        self.conf([], default_config_files=paths)
+        self.assertEqual('bar', self.conf.foo)
+
+    def test_defer_default_config_files_specific(self):
+        self.conf.register_opt(cfg.StrOpt('foo'))
+        paths = self.create_tempfiles([('test', '[DEFAULT]\nfoo = fromfile')])
+        self.conf.defer_default_config_files(paths)
+        self.conf([])
+        self.assertEqual('fromfile', self.conf.foo)
+
+    def test_defer_default_config_files_consumed(self):
+        self.conf.register_opt(cfg.StrOpt('foo', default='bar'))
+        paths = self.create_tempfiles([('test', '[DEFAULT]\nfoo = fromfile')])
+        self.conf.defer_default_config_files(paths)
+        self.conf([])
+        self.assertEqual('fromfile', self.conf.foo)
+        # Deferral is consumed
+        self.assertIsNone(self.conf._deferred_config_files)
+
+
+class DeferredMultiServiceTestCase(base.BaseTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.useFixture(fixtures.NestedTempfile())
+        self._orig_multi_service = cfg.CONF._multi_service
+        self._orig_registry_instances = dict(cfg._registry._instances)
+        cfg._registry._instances = {}
+        cfg.CONF._multi_service = False
+        cfg.CONF._default.reset()
+
+        def _restore():
+            cfg._registry._instances = self._orig_registry_instances
+            cfg.CONF._multi_service = self._orig_multi_service
+            cfg.CONF._default.reset()
+            try:
+                ctx = cfg._registry._get_context()
+                if hasattr(ctx, 'active_service'):
+                    delattr(ctx, 'active_service')
+            except Exception:
+                pass
+
+        self.addCleanup(_restore)
+
+    def test_deferred_overrides_isolated_per_service(self):
+        cfg.CONF.enable_multi_service()
+        cfg._registry.register('svc-a')
+        cfg._registry.register('svc-b')
+
+        cfg._registry.activate('svc-a')
+        cfg.CONF.defer_args([])
+        cfg.CONF.defer_default_config_files([])
+        cfg.CONF.defer_override('connection', 'sqlite:///a.db',
+                                group='database')
+
+        cfg._registry.activate('svc-b')
+        cfg.CONF.defer_args([])
+        cfg.CONF.defer_default_config_files([])
+        cfg.CONF.defer_override('connection', 'sqlite:///b.db',
+                                group='database')
+
+        # Parse svc-a
+        cfg._registry.activate('svc-a')
+        cfg.CONF.register_group(cfg.OptGroup('database'))
+        cfg.CONF.register_opt(cfg.StrOpt('connection'), group='database')
+        cfg.CONF(args=[], project='svc-a')
+
+        # Parse svc-b
+        cfg._registry.activate('svc-b')
+        cfg.CONF.register_group(cfg.OptGroup('database'))
+        cfg.CONF.register_opt(cfg.StrOpt('connection'), group='database')
+        cfg.CONF(args=[], project='svc-b')
+
+        cfg._registry.activate('svc-a')
+        self.assertEqual('sqlite:///a.db', cfg.CONF.database.connection)
+
+        cfg._registry.activate('svc-b')
+        self.assertEqual('sqlite:///b.db', cfg.CONF.database.connection)
