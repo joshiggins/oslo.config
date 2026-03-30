@@ -2236,14 +2236,14 @@ class ConfigOpts(abc.Mapping):
 
         self._load_alternative_sources()
 
-        self._check_required_opts()
-
         # Apply deferred overrides after parsing is complete
         for group, name, value in deferred:
             try:
                 self.set_override(name, value, group=group)
             except (NoSuchGroupError, NoSuchOptError):
                 self._pending_overrides[(group, name)] = value
+
+        self._check_required_opts()
 
     def _print_shell_completion(self, shell):
         """Print shell completion Script
