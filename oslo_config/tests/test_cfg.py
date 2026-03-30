@@ -5273,7 +5273,9 @@ class DeferredConfigTestCase(BaseTestCase):
 
     def test_defer_override_unknown_option(self):
         self.conf.defer_override('nonexistent', 'value')
-        self.assertRaises(cfg.NoSuchOptError, self.conf, [])
+        self.conf([])
+        # Unknown option becomes pending instead of raising
+        self.assertIn((None, 'nonexistent'), self.conf._pending_overrides)
 
     def test_defer_args_empty(self):
         self.conf.register_cli_opt(cfg.BoolOpt('debug', default=False))
@@ -5323,6 +5325,100 @@ class DeferredConfigTestCase(BaseTestCase):
         self.assertEqual('fromfile', self.conf.foo)
         # Deferral is consumed
         self.assertIsNone(self.conf._deferred_config_files)
+
+
+class PendingOverridesTestCase(BaseTestCase):
+
+    def test_pending_override_applied_on_group_register(self):
+        self.conf.defer_override('myopt', 'myval', group='dyngroup')
+        self.conf([])
+
+        # Override is pending — group doesn't exist yet
+        self.assertIn(('dyngroup', 'myopt'), self.conf._pending_overrides)
+
+        # Register the group and option
+        self.conf.register_group(cfg.OptGroup('dyngroup'))
+        self.conf.register_opt(cfg.StrOpt('myopt'), group='dyngroup')
+
+        # Pending override should have been applied
+        self.assertEqual('myval', self.conf.dyngroup.myopt)
+        self.assertFalse(self.conf._pending_overrides)
+
+    def test_pending_override_applied_on_opt_register(self):
+        # Group exists but opt doesn't yet
+        self.conf.register_group(cfg.OptGroup('mygroup'))
+        self.conf.defer_override('lateoption', 'lateval', group='mygroup')
+        self.conf([])
+
+        # Group exists but opt doesn't — should be pending
+        self.assertIn(('mygroup', 'lateoption'), self.conf._pending_overrides)
+
+        # Register the opt
+        self.conf.register_opt(cfg.StrOpt('lateoption'), group='mygroup')
+
+        # Should be applied now
+        self.assertEqual('lateval', self.conf.mygroup.lateoption)
+        self.assertFalse(self.conf._pending_overrides)
+
+    def test_pending_override_cleared_on_reset(self):
+        self.conf.defer_override('foo', 'bar', group='nogroup')
+        self.conf([])
+        self.assertTrue(self.conf._pending_overrides)
+        self.conf.reset()
+        self.assertFalse(self.conf._pending_overrides)
+
+    def test_pending_override_cleared_on_clear(self):
+        self.conf.defer_override('foo', 'bar', group='nogroup')
+        self.conf([])
+        self.assertTrue(self.conf._pending_overrides)
+        self.conf.clear()
+        self.assertFalse(self.conf._pending_overrides)
+
+    def test_multiple_pending_overrides_same_group(self):
+        self.conf.defer_override('opt_a', 'val_a', group='dyngroup')
+        self.conf.defer_override('opt_b', 'val_b', group='dyngroup')
+        self.conf([])
+
+        self.conf.register_group(cfg.OptGroup('dyngroup'))
+        self.conf.register_opt(cfg.StrOpt('opt_a'), group='dyngroup')
+        self.conf.register_opt(cfg.StrOpt('opt_b'), group='dyngroup')
+
+        self.assertEqual('val_a', self.conf.dyngroup.opt_a)
+        self.assertEqual('val_b', self.conf.dyngroup.opt_b)
+        self.assertFalse(self.conf._pending_overrides)
+
+    def test_integration_glance_store_pattern(self):
+        # Simulates glance_store's dynamic backend registration
+        self.conf.register_opt(cfg.StrOpt('enabled_backends'))
+        self.conf.defer_override('enabled_backends', 'mystore:file')
+        self.conf.defer_override(
+            'filesystem_store_datadir', '/tmp', group='mystore')
+        self.conf([])
+
+        # Simulate what glance_store.register_store_opts does:
+        # 1. Read enabled_backends
+        backends = self.conf.enabled_backends
+        self.assertEqual('mystore:file', backends)
+        # 2. Create dynamic group
+        self.conf.register_group(cfg.OptGroup('mystore'))
+        # 3. Register store-specific options
+        self.conf.register_opt(
+            cfg.StrOpt('filesystem_store_datadir'), group='mystore')
+
+        # The pending override should now be applied
+        self.assertEqual('/tmp', self.conf.mystore.filesystem_store_datadir)
+        self.assertFalse(self.conf._pending_overrides)
+
+    def test_pending_override_for_default_group(self):
+        # Unknown opt in DEFAULT group becomes pending
+        self.conf.defer_override('lateoption', 'val')
+        self.conf([])
+        self.assertIn((None, 'lateoption'), self.conf._pending_overrides)
+
+        # Register the opt
+        self.conf.register_opt(cfg.StrOpt('lateoption'))
+        self.assertEqual('val', self.conf.lateoption)
+        self.assertFalse(self.conf._pending_overrides)
 
 
 class DeferredMultiServiceTestCase(base.BaseTestCase):

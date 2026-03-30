@@ -2014,6 +2014,7 @@ class ConfigOpts(abc.Mapping):
         self._deferred_overrides = []      # [(group, name, value), ...]
         self._deferred_args = None         # None = not set
         self._deferred_config_files = None # None = not set
+        self._pending_overrides = {}       # {(group, name): value}
 
         self.register_opt(self._config_source_opt)
         self.register_cli_opt(self._shell_completion_opt)
@@ -2202,6 +2203,7 @@ class ConfigOpts(abc.Mapping):
         # Capture deferred overrides before clear() resets them
         deferred = self._deferred_overrides
         self._deferred_overrides = []
+        self._pending_overrides = {}
 
         self.clear()
 
@@ -2238,7 +2240,10 @@ class ConfigOpts(abc.Mapping):
 
         # Apply deferred overrides after parsing is complete
         for group, name, value in deferred:
-            self.set_override(name, value, group=group)
+            try:
+                self.set_override(name, value, group=group)
+            except (NoSuchGroupError, NoSuchOptError):
+                self._pending_overrides[(group, name)] = value
 
     def _print_shell_completion(self, shell):
         """Print shell completion Script
@@ -2504,6 +2509,7 @@ class ConfigOpts(abc.Mapping):
     def reset(self):
         """Clear the object state and unset overrides and defaults."""
         self._unset_defaults_and_overrides()
+        self._pending_overrides = {}
         self.clear()
 
     @__clear_cache
@@ -2522,6 +2528,7 @@ class ConfigOpts(abc.Mapping):
         self._mutable_ns = None
         # Keep _mutate_hooks
         self._validate_default_values = False
+        self._pending_overrides = {}
         self.unregister_opts(self._config_opts)
         for group in self._groups.values():
             group._clear()
@@ -2573,7 +2580,9 @@ class ConfigOpts(abc.Mapping):
             if cli:
                 self._add_cli_opt(opt, group)
             self._track_deprecated_opts(opt, group=group)
-            return group._register_opt(opt, cli)
+            result = group._register_opt(opt, cli)
+            self._apply_pending_override_for_opt(opt, group=group)
+            return result
 
         # NOTE(gcb) We can't use some names which are same with attributes of
         # Opts in default group. They includes project, prog, version, usage,
@@ -2591,6 +2600,7 @@ class ConfigOpts(abc.Mapping):
 
         self._opts[opt.dest] = {'opt': opt, 'cli': cli}
         self._track_deprecated_opts(opt)
+        self._apply_pending_override_for_opt(opt, group=None)
         return True
 
     @__clear_cache
@@ -2635,6 +2645,34 @@ class ConfigOpts(abc.Mapping):
             return
 
         self._groups[group.name] = copy.copy(group)
+        self._apply_pending_overrides_for_group(group.name)
+
+    def _apply_pending_overrides_for_group(self, group_name):
+        """Apply any pending overrides that target the given group."""
+        if not self._pending_overrides:
+            return
+        applied = []
+        for (group, name), value in self._pending_overrides.items():
+            if group == group_name:
+                try:
+                    self.set_override(name, value, group=group)
+                    applied.append((group, name))
+                except NoSuchOptError:
+                    pass  # opt not registered yet, keep pending
+        for key in applied:
+            del self._pending_overrides[key]
+
+    def _apply_pending_override_for_opt(self, opt, group=None):
+        """Apply a pending override for a specific opt if one exists."""
+        if not self._pending_overrides:
+            return
+        group_name = None
+        if group is not None:
+            group_name = group.name if hasattr(group, 'name') else group
+        key = (group_name, opt.dest)
+        if key in self._pending_overrides:
+            value = self._pending_overrides.pop(key)
+            self.set_override(opt.dest, value, group=group_name)
 
     @__clear_cache
     def unregister_opt(self, opt, group=None):
